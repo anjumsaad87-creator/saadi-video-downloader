@@ -201,7 +201,12 @@ async function getVideoInfo(url) {
     ...(process.env.YTDLP_COOKIES ? { cookies: process.env.YTDLP_COOKIES } : {}),
     ...(process.env.YTDLP_PROXY ? { proxy: process.env.YTDLP_PROXY } : {}),
   });
-  return JSON.parse(String(stdout).trim());
+  // yt-dlp-exec can return string, Buffer, or an object depending on version/options.
+  const raw = (stdout && typeof stdout === 'object' && 'stdout' in stdout)
+    ? stdout.stdout
+    : stdout;
+  const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '');
+  return JSON.parse(text.trim());
 }
 
 async function updateYtDlp() {
@@ -445,10 +450,13 @@ app.get('*', (req, res) => {
 async function start() {
   // Fetch cookies (optional) for providers that require sign-in/bot verification.
   if (process.env.YTDLP_COOKIES_URL) {
+    console.log('Remote cookies: enabled (YTDLP_COOKIES_URL set).');
     await ensureRemoteCookies();
     const st = await getCookiesStatus();
     if (st.exists) console.log(`Cookies status: ready (bytes=${st.bytes}).`);
     else console.warn('Cookies status: configured but file is missing.');
+  } else {
+    console.log('Remote cookies: disabled (YTDLP_COOKIES_URL not set).');
   }
 
   app.listen(PORT, () => {
