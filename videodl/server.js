@@ -10,11 +10,16 @@ const { promisify } = require('util');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const os = require('os');
+const { create: createYtDlp } = require('yt-dlp-exec');
 
 const execAsync = promisify(exec);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Hostinger (and most Node hosting) runs behind a reverse proxy and sets
+// X-Forwarded-* headers. This is required for correct rate-limiting.
+app.set('trust proxy', 1);
 
 // ── Security & Middleware ──────────────────────────────────────────────────
 app.use(helmet({
@@ -65,13 +70,35 @@ function isValidUrl(url) {
   } catch { return false; }
 }
 
-function getYtDlpPath() {
-  // Try yt-dlp-exec binary path, then fallback to system yt-dlp
-  try {
-    return require('yt-dlp-exec').path || 'yt-dlp';
-  } catch {
-    return 'yt-dlp';
+function getYtDlp() {
+  // Use yt-dlp-exec Node API so we don't depend on a global yt-dlp binary.
+  // This is critical on hosts where /bin/sh can't find `yt-dlp`.
+  const localBin = process.platform === 'win32'
+    ? path.join(__dirname, 'bin', 'yt-dlp.exe')
+    : path.join(__dirname, 'bin', 'yt-dlp');
+  const localPy = path.join(__dirname, 'bin', 'yt-dlp.py');
+
+  // Some hosts mount app directories as `noexec` (EACCES when spawning binaries).
+  // If python3 is available, use the Python script fallback to avoid execute-bit issues.
+  if (process.platform !== 'win32' && fs.existsSync(localPy)) {
+    return createYtDlp('python3', { 
+      processOptions: { 
+        // Run: python3 <script> ...args
+        // yt-dlp-exec will append args after the executable; we inject the script first.
+        env: process.env,
+      },
+      // Prepend script path as the first argument.
+      args: [localPy],
+    });
   }
+
+  // Prefer our downloaded binary if present.
+  if (fs.existsSync(localBin)) {
+    return createYtDlp(localBin);
+  }
+
+  // Fallback: default yt-dlp-exec behavior (may still fail on some hosts).
+  return require('yt-dlp-exec');
 }
 
 function getYtDlpCommonArgs() {
@@ -100,22 +127,30 @@ function getYtDlpCommonArgs() {
 }
 
 async function getVideoInfo(url) {
-  const ytDlp = getYtDlpPath();
-  const cmd = [
-    `"${ytDlp}"`,
-    ...getYtDlpCommonArgs(),
-    '--dump-json',
-    `"${url}"`,
-  ].join(' ');
-  const { stdout } = await execAsync(cmd, { timeout: 45000 });
-  return JSON.parse(stdout.trim());
+  const ytDlp = getYtDlp();
+  const stdout = await ytDlp(url, {
+    dumpJson: true,
+    noPlaylist: true,
+    noWarnings: true,
+    geoBypass: true,
+    geoBypassCountry: 'US',
+    socketTimeout: 20,
+    retries: 3,
+    fragmentRetries: 3,
+    retrySleep: '1:3',
+    concurrentFragments: 4,
+    addHeader: ['referer: https://www.youtube.com/', 'user-agent: Mozilla/5.0'],
+    ...(process.env.YTDLP_COOKIES ? { cookies: process.env.YTDLP_COOKIES } : {}),
+    ...(process.env.YTDLP_PROXY ? { proxy: process.env.YTDLP_PROXY } : {}),
+  });
+  return JSON.parse(String(stdout).trim());
 }
 
 async function updateYtDlp() {
   try {
-    const ytDlp = getYtDlpPath();
-    await execAsync(`"${ytDlp}" -U`, { timeout: 60000 });
-    console.log('yt-dlp updated successfully');
+    // yt-dlp-exec manages yt-dlp internally; updating via CLI may not exist on hosts.
+    // Keep this as a best-effort no-op.
+    console.log('yt-dlp update skipped (managed by yt-dlp-exec)');
   } catch (e) {
     console.warn('yt-dlp update skipped:', e.message);
   }
@@ -227,22 +262,28 @@ app.post('/api/download', async (req, res) => {
   const isAudio = quality_id === 'audio';
   const outputTemplate = path.join(tmpDir, `${fileId}.%(ext)s`);
 
-  const ytDlp = getYtDlpPath();
-  const formatArg = format.replace(/"/g, '\\"');
-
-  const cmd = [
-    `"${ytDlp}"`,
-    `--format "${formatArg}"`,
-    '--merge-output-format mp4',
-    ...getYtDlpCommonArgs(),
-    `--output "${outputTemplate}"`,
-    isAudio ? '--extract-audio --audio-format mp3 --audio-quality 0' : '',
-    `"${cleanUrl}"`,
-  ].filter(Boolean).join(' ');
+  const ytDlp = getYtDlp();
 
   try {
     console.log(`Downloading [${quality_id}]: ${cleanUrl}`);
-    await execAsync(cmd, { timeout: 15 * 60 * 1000 }); // 15 min timeout
+    await ytDlp(cleanUrl, {
+      format,
+      mergeOutputFormat: 'mp4',
+      output: outputTemplate,
+      noPlaylist: true,
+      noWarnings: true,
+      geoBypass: true,
+      geoBypassCountry: 'US',
+      socketTimeout: 20,
+      retries: 3,
+      fragmentRetries: 3,
+      retrySleep: '1:3',
+      concurrentFragments: 4,
+      addHeader: ['referer: https://www.youtube.com/', 'user-agent: Mozilla/5.0'],
+      ...(process.env.YTDLP_COOKIES ? { cookies: process.env.YTDLP_COOKIES } : {}),
+      ...(process.env.YTDLP_PROXY ? { proxy: process.env.YTDLP_PROXY } : {}),
+      ...(isAudio ? { extractAudio: true, audioFormat: 'mp3', audioQuality: 0 } : {}),
+    }, { timeout: 15 * 60 * 1000 });
 
     // Find the output file
     const files = fs.readdirSync(tmpDir).filter(f => f.startsWith(fileId));
@@ -303,12 +344,15 @@ app.post('/api/direct-url', async (req, res) => {
   if (!url || !format) return res.status(400).json({ error: 'Missing params' });
 
   try {
-    const ytDlp = getYtDlpPath();
-    const { stdout } = await execAsync(
-      `"${ytDlp}" --get-url --format "${format}" --no-playlist "${url.trim()}"`,
-      { timeout: 30000 }
-    );
-    const urls = stdout.trim().split('\n').filter(Boolean);
+    const ytDlp = getYtDlp();
+    const stdout = await ytDlp(url.trim(), {
+      getUrl: true,
+      format,
+      noPlaylist: true,
+      ...(process.env.YTDLP_COOKIES ? { cookies: process.env.YTDLP_COOKIES } : {}),
+      ...(process.env.YTDLP_PROXY ? { proxy: process.env.YTDLP_PROXY } : {}),
+    }, { timeout: 45000 });
+    const urls = String(stdout).trim().split('\n').filter(Boolean);
     res.json({ urls });
   } catch (err) {
     res.status(500).json({ error: 'Could not retrieve direct URL.' });

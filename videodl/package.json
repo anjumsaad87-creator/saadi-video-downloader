@@ -1,12 +1,14 @@
 {
   "name": "videodl-server",
   "version": "1.0.0",
-  "description": "Video Downloader API - YouTube & Facebook",
+  "description": "Saadi Video Downloader (SVD) - Video Downloader API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "build": "npm run build:frontend",
     "build:frontend": "cd frontend && npm install && npm run build",
+    "postinstall": "node scripts/ensure-ytdlp.js",
     "setup": "npm install && npm run build:frontend"
   },
   "dependencies": {
