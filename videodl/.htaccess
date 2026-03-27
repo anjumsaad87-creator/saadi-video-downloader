@@ -1,0 +1,81 @@
+# ── Saadi Video Downloader (SVD) – LiteSpeed / Apache htaccess ───────────
+# Place this in your public_html root OR the app root directory
+
+Options -Indexes
+DirectoryIndex index.html
+
+# ── Security Headers ──────────────────────────────────────────────────────
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set X-XSS-Protection "1; mode=block"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+</IfModule>
+
+# ── GZIP / Compression ────────────────────────────────────────────────────
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css
+  AddOutputFilterByType DEFLATE text/javascript application/javascript
+  AddOutputFilterByType DEFLATE application/json application/manifest+json
+  AddOutputFilterByType DEFLATE image/svg+xml font/woff2
+</IfModule>
+
+# ── Static File Caching ───────────────────────────────────────────────────
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/html "access plus 0 seconds"
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType image/png "access plus 1 year"
+  ExpiresByType image/svg+xml "access plus 1 year"
+  ExpiresByType font/woff2 "access plus 1 year"
+  ExpiresByType application/manifest+json "access plus 1 week"
+</IfModule>
+
+# ── Service Worker Caching ────────────────────────────────────────────────
+<FilesMatch "sw\.js$">
+  Header set Cache-Control "no-cache, no-store, must-revalidate"
+  Header set Pragma "no-cache"
+  Header set Expires "0"
+</FilesMatch>
+
+# ── API Proxy to Node.js (port 3001) ─────────────────────────────────────
+# Hostinger Node.js apps run on an internal port.
+# If using Hostinger's Node.js hosting, the app IS the server.
+# If serving static files separately, uncomment the proxy below:
+#
+# <IfModule mod_proxy.c>
+#   ProxyPreserveHost On
+#   ProxyPass /api http://localhost:3001/api
+#   ProxyPassReverse /api http://localhost:3001/api
+# </IfModule>
+
+# ── SPA React Router Fallback ─────────────────────────────────────────────
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Handle HTTPS redirect
+  RewriteCond %{HTTPS} off
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # Don't rewrite files and directories that exist
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+
+  # API routes go to Node.js (if proxying)
+  # RewriteRule ^api/(.*)$ http://localhost:3001/api/$1 [P,L]
+
+  # Everything else → index.html (SPA fallback)
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+# ── Block common attacks ──────────────────────────────────────────────────
+<IfModule mod_rewrite.c>
+  RewriteCond %{QUERY_STRING} (\<|%3C).*script.*(\>|%3E) [NC,OR]
+  RewriteCond %{QUERY_STRING} GLOBALS(=|\[|\%[0-9A-Z]{0,2}) [OR]
+  RewriteCond %{QUERY_STRING} _REQUEST(=|\[|\%[0-9A-Z]{0,2})
+  RewriteRule ^ - [F,L]
+</IfModule>
