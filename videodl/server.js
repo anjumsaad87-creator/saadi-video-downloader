@@ -11,6 +11,8 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const os = require('os');
 const { create: createYtDlp } = require('yt-dlp-exec');
+const https = require('https');
+const http = require('http');
 
 const execAsync = promisify(exec);
 
@@ -126,6 +128,50 @@ function getYtDlpCommonArgs() {
   return args;
 }
 
+async function downloadToFile(url, filePath, headers = {}) {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+
+  const client = url.startsWith('https:') ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = client.get(url, { headers }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(downloadToFile(res.headers.location, filePath, headers));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+
+      const out = fs.createWriteStream(filePath, { mode: 0o600 });
+      res.pipe(out);
+      out.on('finish', () => out.close(resolve));
+      out.on('error', reject);
+    });
+    req.on('error', reject);
+  });
+}
+
+async function ensureRemoteCookies() {
+  const cookiesUrl = process.env.YTDLP_COOKIES_URL;
+  if (!cookiesUrl) return;
+
+  // Do not log the URL (it may contain secrets).
+  const dest = path.join(os.tmpdir(), 'svd-cookies.txt');
+  const headers = {};
+  if (process.env.YTDLP_COOKIES_AUTH) {
+    headers['Authorization'] = process.env.YTDLP_COOKIES_AUTH;
+  }
+
+  try {
+    await downloadToFile(cookiesUrl, dest, headers);
+    process.env.YTDLP_COOKIES = dest;
+    console.log('Cookies file downloaded for yt-dlp.');
+  } catch (e) {
+    console.warn(`Cookies download failed: ${e.message}`);
+  }
+}
+
 async function getVideoInfo(url) {
   const ytDlp = getYtDlp();
   const stdout = await ytDlp(url, {
@@ -234,11 +280,17 @@ app.post('/api/info', async (req, res) => {
     res.json(response);
   } catch (err) {
     console.error('Info error:', err.message);
-    if (err.message.includes('Private video') || err.message.includes('not available')) {
+    const msg = String(err?.message || '');
+    if (msg.toLowerCase().includes("sign in to confirm you're not a bot") || msg.toLowerCase().includes('not a bot') || msg.toLowerCase().includes('cookies-from-browser') || msg.toLowerCase().includes('use --cookies')) {
+      return res.status(400).json({
+        error: 'YouTube requires verification on server IPs. Add cookies (YTDLP_COOKIES) or try again later.'
+      });
+    }
+    if (msg.includes('Private video') || msg.includes('not available')) {
       return res.status(400).json({ error: 'This video is private or unavailable.' });
     }
-    if (err.message.includes('age')) {
-      return res.status(400).json({ error: 'Age-restricted video. Cannot download.' });
+    if (msg.toLowerCase().includes('age') && msg.toLowerCase().includes('restricted')) {
+      return res.status(400).json({ error: 'Age-restricted video. Sign-in (cookies) is required.' });
     }
     res.status(500).json({ error: 'Failed to fetch video info. The URL may be invalid or the platform may be temporarily unavailable.' });
   }
@@ -375,4 +427,6 @@ app.listen(PORT, () => {
   console.log(`   API: http://localhost:${PORT}/api/health\n`);
   // Update yt-dlp on startup
   updateYtDlp();
+  // Fetch cookies (optional) for providers that require sign-in/bot verification.
+  ensureRemoteCookies();
 });
