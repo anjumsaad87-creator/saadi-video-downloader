@@ -14,6 +14,21 @@ const { create: createYtDlp } = require('yt-dlp-exec');
 const https = require('https');
 const http = require('http');
 
+const DEFAULT_YTDLP_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
+function getYtDlpUserAgent() {
+  return (process.env.YTDLP_USER_AGENT || '').trim() || DEFAULT_YTDLP_UA;
+}
+
+function getYtDlpExtractorArgs() {
+  const explicit = (process.env.YTDLP_EXTRACTOR_ARGS || '').trim();
+  if (explicit) return explicit;
+  const youtubeClient = (process.env.YTDLP_YOUTUBE_CLIENT || '').trim();
+  if (youtubeClient) return `youtube:player_client=${youtubeClient}`;
+  return '';
+}
+
 const execAsync = promisify(exec);
 
 const app = express();
@@ -104,6 +119,7 @@ function getYtDlp() {
 }
 
 function getYtDlpCommonArgs() {
+  const extractorArgs = getYtDlpExtractorArgs();
   const args = [
     '--no-playlist',
     '--no-warnings',
@@ -115,8 +131,12 @@ function getYtDlpCommonArgs() {
     '--retry-sleep 1:3',
     '--concurrent-fragments 4',
     '--add-header "referer: https://www.youtube.com/"',
-    '--add-header "user-agent: Mozilla/5.0"',
+    `--add-header "user-agent: ${getYtDlpUserAgent().replace(/"/g, '\\"')}"`,
   ];
+
+  if (extractorArgs) {
+    args.push(`--extractor-args "${extractorArgs.replace(/"/g, '\\"')}"`);
+  }
 
   if (process.env.YTDLP_COOKIES) {
     // NOTE: file path must exist on the server.
@@ -186,6 +206,7 @@ async function getCookiesStatus() {
 
 async function getVideoInfo(url) {
   const ytDlp = getYtDlp();
+  const extractorArgs = getYtDlpExtractorArgs();
   const stdout = await ytDlp(url, {
     dumpJson: true,
     noPlaylist: true,
@@ -197,7 +218,8 @@ async function getVideoInfo(url) {
     fragmentRetries: 3,
     retrySleep: '1:3',
     concurrentFragments: 4,
-    addHeader: ['referer: https://www.youtube.com/', 'user-agent: Mozilla/5.0'],
+    addHeader: ['referer: https://www.youtube.com/', `user-agent: ${getYtDlpUserAgent()}`],
+    ...(extractorArgs ? { extractorArgs } : {}),
     ...(process.env.YTDLP_COOKIES ? { cookies: process.env.YTDLP_COOKIES } : {}),
     ...(process.env.YTDLP_PROXY ? { proxy: process.env.YTDLP_PROXY } : {}),
   });
@@ -308,7 +330,7 @@ app.post('/api/info', async (req, res) => {
     const msg = String(err?.message || '');
     if (msg.toLowerCase().includes("sign in to confirm you're not a bot") || msg.toLowerCase().includes('not a bot') || msg.toLowerCase().includes('cookies-from-browser') || msg.toLowerCase().includes('use --cookies')) {
       return res.status(400).json({
-        error: 'YouTube requires verification on server IPs. Add cookies (YTDLP_COOKIES) or try again later.'
+        error: 'YouTube blocked this server IP (bot-check). If cookies are already configured, try re-exporting fresh YouTube cookies, set YTDLP_YOUTUBE_CLIENT=android, or use a proxy (YTDLP_PROXY).'
       });
     }
     if (msg.includes('Private video') || msg.includes('not available')) {
@@ -340,6 +362,7 @@ app.post('/api/download', async (req, res) => {
   const outputTemplate = path.join(tmpDir, `${fileId}.%(ext)s`);
 
   const ytDlp = getYtDlp();
+  const extractorArgs = getYtDlpExtractorArgs();
 
   try {
     console.log(`Downloading [${quality_id}]: ${cleanUrl}`);
@@ -356,7 +379,8 @@ app.post('/api/download', async (req, res) => {
       fragmentRetries: 3,
       retrySleep: '1:3',
       concurrentFragments: 4,
-      addHeader: ['referer: https://www.youtube.com/', 'user-agent: Mozilla/5.0'],
+      addHeader: ['referer: https://www.youtube.com/', `user-agent: ${getYtDlpUserAgent()}`],
+      ...(extractorArgs ? { extractorArgs } : {}),
       ...(process.env.YTDLP_COOKIES ? { cookies: process.env.YTDLP_COOKIES } : {}),
       ...(process.env.YTDLP_PROXY ? { proxy: process.env.YTDLP_PROXY } : {}),
       ...(isAudio ? { extractAudio: true, audioFormat: 'mp3', audioQuality: 0 } : {}),
@@ -422,10 +446,13 @@ app.post('/api/direct-url', async (req, res) => {
 
   try {
     const ytDlp = getYtDlp();
+    const extractorArgs = getYtDlpExtractorArgs();
     const stdout = await ytDlp(url.trim(), {
       getUrl: true,
       format,
       noPlaylist: true,
+      addHeader: ['referer: https://www.youtube.com/', `user-agent: ${getYtDlpUserAgent()}`],
+      ...(extractorArgs ? { extractorArgs } : {}),
       ...(process.env.YTDLP_COOKIES ? { cookies: process.env.YTDLP_COOKIES } : {}),
       ...(process.env.YTDLP_PROXY ? { proxy: process.env.YTDLP_PROXY } : {}),
     }, { timeout: 45000 });
