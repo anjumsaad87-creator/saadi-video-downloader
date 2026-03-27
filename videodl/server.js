@@ -166,9 +166,21 @@ async function ensureRemoteCookies() {
   try {
     await downloadToFile(cookiesUrl, dest, headers);
     process.env.YTDLP_COOKIES = dest;
-    console.log('Cookies file downloaded for yt-dlp.');
+    const st = await fs.promises.stat(dest);
+    console.log(`Cookies file downloaded for yt-dlp (bytes=${st.size}).`);
   } catch (e) {
     console.warn(`Cookies download failed: ${e.message}`);
+  }
+}
+
+async function getCookiesStatus() {
+  const cookiesPath = process.env.YTDLP_COOKIES;
+  if (!cookiesPath) return { configured: false };
+  try {
+    const st = await fs.promises.stat(cookiesPath);
+    return { configured: true, exists: true, bytes: st.size, mtimeMs: st.mtimeMs, path: cookiesPath };
+  } catch {
+    return { configured: true, exists: false, path: cookiesPath };
   }
 }
 
@@ -223,6 +235,14 @@ app.post('/api/info', async (req, res) => {
   }
 
   try {
+    // If remote cookies are configured but missing/empty (common after restarts), try to fetch again.
+    if (process.env.YTDLP_COOKIES_URL) {
+      const st = await getCookiesStatus();
+      if (!st.configured || !st.exists || !st.bytes) {
+        await ensureRemoteCookies();
+      }
+    }
+
     const info = await getVideoInfo(cleanUrl);
 
     // Build quality options from formats
@@ -422,11 +442,21 @@ app.get('*', (req, res) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🎬 Saadi Video Downloader (SVD) server running on port ${PORT}`);
-  console.log(`   API: http://localhost:${PORT}/api/health\n`);
-  // Update yt-dlp on startup
-  updateYtDlp();
+async function start() {
   // Fetch cookies (optional) for providers that require sign-in/bot verification.
-  ensureRemoteCookies();
-});
+  if (process.env.YTDLP_COOKIES_URL) {
+    await ensureRemoteCookies();
+    const st = await getCookiesStatus();
+    if (st.exists) console.log(`Cookies status: ready (bytes=${st.bytes}).`);
+    else console.warn('Cookies status: configured but file is missing.');
+  }
+
+  app.listen(PORT, () => {
+    console.log(`\n🎬 Saadi Video Downloader (SVD) server running on port ${PORT}`);
+    console.log(`   API: http://localhost:${PORT}/api/health\n`);
+    // Update yt-dlp on startup
+    updateYtDlp();
+  });
+}
+
+start();
